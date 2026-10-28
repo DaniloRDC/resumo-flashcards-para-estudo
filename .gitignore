@@ -1,0 +1,78 @@
+# =============================================================================
+# EstudaPDF — .gitignore
+# =============================================================================
+
+# 1. PDFs gerados localmente e arquivos de estudo enviados pelos usuários
+# (Evita expor materiais pessoais, apostilas ou PDFs de teste no GitHub)
+*.pdf
+resumo_flashcards_*.pdf
+uploads/
+outputs/
+downloads/
+
+# 2. Cache e bytecode do Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 3. Ambientes virtuais (Virtual Environments)
+.venv/
+venv/
+ENV/
+env/
+
+# 4. Variáveis de ambiente, credenciais e dados sensíveis
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets.json
+credentials.json
+
+# 5. Testes, cobertura e logs
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+logs/
+
+# 6. Arquivos temporários e de backup
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+tmp/
+temp/
+scratch/
+
+# 7. Configurações locais de IDEs e Editores
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# 8. Arquivos de sistema operacional (Windows, OneDrive, macOS, Linux)
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+~$*
+

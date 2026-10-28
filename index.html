@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EstudaPDF — Resumos Estruturados e Flashcards em PDF Único</title>
+  <meta name="description" content="Sistema Multiagente que transforma apostilas em PDF ou URLs de estudo em um único arquivo PDF contendo Resumo Estruturado e Flashcards organizados por tema." />
+  <meta name="theme-color" content="#0b0f19" />
+  <meta property="og:title" content="EstudaPDF — Resumos e Flashcards em PDF Único" />
+  <meta property="og:description" content="Envie um PDF ou cole uma URL de estudo e receba um PDF único paginado com Resumo Estruturado + Flashcards revisados por 3 Agentes." />
+  <meta property="og:type" content="website" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎓</text></svg>" />
+  <link rel="stylesheet" href="./static/styles.css" />
+  <!-- Bibliotecas Client-Side para funcionamento 100% Estático (GitHub Pages / Vercel / Netlify) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" defer></script>
+</head>
+<body>
+  <!-- Drag-and-drop overlay -->
+  <div id="drop-overlay" class="drop-overlay hidden">
+    <div class="drop-box">
+      <div class="drop-icon">📄</div>
+      <h3>Solte seu arquivo PDF aqui</h3>
+      <p>O EstudaPDF irá extrair o conteúdo, gerar o resumo estruturado e os flashcards em um único PDF.</p>
+    </div>
+  </div>
+
+  <!-- Mobile Sidebar Backdrop -->
+  <div id="sidebar-backdrop" class="sidebar-backdrop hidden"></div>
+
+  <!-- Toast Container -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <div class="app-layout">
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <div class="brand">
+          <div class="brand-logo">🎓</div>
+          <div>
+            <h1>EstudaPDF</h1>
+            <span class="skill-badge">● 3 Agentes Anti-Erro</span>
+          </div>
+        </div>
+        <button id="btn-new-chat" class="btn-new-chat" title="Iniciar novo estudo">
+          <span>＋</span> Novo Material
+        </button>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-section-header">
+          <div class="sidebar-section-title">Meus PDFs Gerados</div>
+          <button id="btn-clear-history" class="btn-clear-history" title="Limpar histórico salvo no navegador">Limpar</button>
+        </div>
+        <div class="storage-privacy-note">
+          <span>🔒</span> Salvos localmente no seu navegador
+        </div>
+        <div id="history-list" class="history-list">
+          <div class="history-empty">Carregando histórico...</div>
+        </div>
+      </div>
+
+      <div class="sidebar-footer">
+        <button id="btn-open-settings" class="btn-settings">
+          <span>⚙️</span> Motor IA / Chave API (Opcional)
+        </button>
+        <div class="rules-info">
+          Arquitetura <code>AGENTS.md</code>:<br />
+          Construtor • Revisor • Tester → PDF Único.
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Chat Area -->
+    <main class="chat-main">
+      <!-- Top Header -->
+      <header class="chat-header">
+        <div class="header-left">
+          <button id="btn-toggle-sidebar" class="btn-icon" title="Alternar menu lateral">☰</button>
+          <div>
+            <h2>EstudaPDF Assistant</h2>
+            <p>Envie uma <strong>URL</strong> ou anexe um <strong>PDF</strong> para receber seu Resumo + Flashcards em PDF único</p>
+          </div>
+        </div>
+        <div class="header-right">
+          <span id="engine-status-pill" class="status-pill">⚡ Motor 3 Agentes Ativo</span>
+        </div>
+      </header>
+
+      <!-- Messages Container -->
+      <div id="chat-messages" class="chat-messages">
+        <!-- Welcome Screen -->
+        <div id="welcome-screen" class="welcome-screen">
+          <div class="welcome-avatar">🎓</div>
+          <h2>Olá! Eu sou o <span>EstudaPDF</span></h2>
+          <p class="welcome-lead">
+            Envie o link de uma página de estudo ou anexe um arquivo PDF abaixo. Eu lerei fielmente a fonte e devolverei
+            <strong>um único arquivo PDF</strong> contendo o <strong>Resumo Estruturado</strong> seguido dos
+            <strong>Flashcards por Tema</strong> prontos para leitura, revisão interativa e impressão.
+          </p>
+
+          <div class="quick-cards">
+            <button class="quick-card" id="quick-test-url">
+              <div class="qc-icon">🌐</div>
+              <div class="qc-body">
+                <strong>Testar com URL de Filosofia e Ética</strong>
+                <span>Demonstração imediata (Unidade 1 - FAM) com Resumo + 20 Flashcards</span>
+              </div>
+            </button>
+
+            <button class="quick-card" id="quick-upload-pdf">
+              <div class="qc-icon">📎</div>
+              <div class="qc-body">
+                <strong>Enviar um Arquivo PDF</strong>
+                <span>Selecione ou arraste uma apostila, artigo científico ou capítulo em PDF</span>
+              </div>
+            </button>
+
+            <button class="quick-card" id="quick-paste-url">
+              <div class="qc-icon">🔗</div>
+              <div class="qc-body">
+                <strong>Colar uma URL de Estudo</strong>
+                <span>Insira o link de qualquer artigo, aula ou documentação pública</span>
+              </div>
+            </button>
+          </div>
+
+          <div class="pipeline-pills">
+            <span>1. Extração Limpa</span>
+            <span>→</span>
+            <span>2. Agente Construtor</span>
+            <span>→</span>
+            <span>3. Agente Revisor</span>
+            <span>→</span>
+            <span>4. Agente Tester</span>
+            <span>→</span>
+            <span>5. PDF Único + Quiz</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Bottom Input Composer -->
+      <div class="composer-wrapper">
+        <form id="chat-form" class="composer-box">
+          <!-- Attached PDF Preview Pill -->
+          <div id="attachment-bar" class="attachment-bar hidden">
+            <div class="attachment-pill">
+              <span class="att-icon">📕</span>
+              <div class="att-meta">
+                <strong id="att-name">arquivo.pdf</strong>
+                <span id="att-size">0 KB</span>
+              </div>
+              <button type="button" id="btn-remove-att" class="btn-remove-att" title="Remover PDF">✕</button>
+            </div>
+          </div>
+
+          <div class="composer-row">
+            <input type="file" id="pdf-file-input" accept="application/pdf,.pdf" class="hidden" />
+            <button type="button" id="btn-attach-pdf" class="btn-attach" title="Anexar arquivo PDF">
+              📎 <span>PDF</span>
+            </button>
+
+            <textarea
+              id="chat-input"
+              rows="1"
+              placeholder="Cole aqui a URL do material de estudo ou anexe um arquivo PDF (📎)..."
+            ></textarea>
+
+            <button type="submit" id="btn-send" class="btn-send" title="Gerar Resumo e Flashcards em PDF">
+              <span class="send-icon">➤</span>
+            </button>
+          </div>
+        </form>
+        <div class="composer-hint">
+          Dica: você pode arrastar um arquivo <code>.pdf</code> para qualquer lugar da tela ou colar diretamente uma URL <code>https://...</code> • Tudo fica salvo com privacidade no seu navegador.
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Settings Modal (Optional API Key) -->
+  <div id="settings-modal" class="modal-backdrop hidden">
+    <div id="settings-card" class="modal-card">
+      <div class="modal-header">
+        <h3>⚙️ Configuração do Motor de Síntese</h3>
+        <button id="btn-close-settings" class="btn-icon">✕</button>
+      </div>
+      <div class="modal-body">
+        <p>
+          O <strong>EstudaPDF</strong> funciona <strong>100% no seu navegador</strong> sem necessidade de servidor ou chave de API.
+          Se desejar utilizar o modelo <strong>Google Gemini</strong> para sínteses avançadas por IA, informe sua chave opcional abaixo:
+        </p>
+        <label for="api-key-input">Chave da API Google Gemini (Opcional)</label>
+        <input
+          type="password"
+          id="api-key-input"
+          placeholder="AIzaSy... (deixe em branco para usar o motor nativo de 3 agentes)"
+          autocomplete="off"
+        />
+        <small>🔒 Sua chave é armazenada exclusivamente no <code>localStorage</code> do seu navegador e nunca é enviada a terceiros.</small>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-save-settings" class="btn-primary">Salvar Configuração</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="./static/app.js"></script>
+</body>
+</html>
+
