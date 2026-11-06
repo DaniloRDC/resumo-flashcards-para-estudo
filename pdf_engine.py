@@ -180,6 +180,46 @@ def fix_utf8_mojibake(text):
             return text
 
 
+def collapse_spaced_letters(text):
+    """
+    Colapsa palavras ou títulos com espaçamento tipográfico entre letras (ex: 'V I S Ã O   G E R A L' -> 'VISÃO GERAL',
+    'I n t r o d u ç ã o' -> 'Introdução'), preservando espaços duplos/triplos como fronteira entre palavras.
+    """
+    if not text or len(text) < 7:
+        return text
+
+    def _collapse_match(m):
+        chunk = m.group(0)
+        # Se houver espaços múltiplos separando palavras espaçadas, colapsa cada palavra individualmente
+        parts = re.split(r" {2,}", chunk)
+        return " ".join(p.replace(" ", "") for p in parts)
+
+    # Sequência de >= 4 letras isoladas separadas por espaço simples (ou grupos separados por espaço duplo)
+    return re.sub(
+        r"(?<!\w)[A-Za-zÀ-ÿ](?: [A-Za-zÀ-ÿ]){3,}(?: {2,}[A-Za-zÀ-ÿ](?: [A-Za-zÀ-ÿ]){2,})*(?!\w)",
+        _collapse_match,
+        text,
+    )
+
+
+def safe_dehyphenate_join(prev_text, next_text):
+    """
+    Une palavra quebrada por hífen no fim de linha ('desenvolvi-' + 'mento' -> 'desenvolvimento'),
+    mas preserva o hífen quando a linha seguinte inicia por pronome enclítico ('trata-' + 'se' -> 'trata-se').
+    """
+    prev_s = (prev_text or "").strip()
+    next_s = (next_text or "").strip()
+    if not prev_s:
+        return next_s
+    if not next_s:
+        return prev_s
+    if prev_s.endswith("-") and not prev_s.endswith((" -", "--", "—", "–")) and next_s[0].islower():
+        if re.match(r"^(?:se|lo|la|los|las|lhe|lhes|me|te|nos|vos)\b", next_s):
+            return prev_s + next_s
+        return prev_s[:-1] + next_s
+    return prev_s + " " + next_s
+
+
 def normalize_extracted_text(text):
     """Expande ligaduras Unicode/LaTeX, repara mojibake, converte glifos fora do CP1252 e limpa artefatos."""
     if not text:
@@ -197,18 +237,24 @@ def normalize_extracted_text(text):
     text = re.sub(r"[\U00010000-\U0010ffff]", "", text)
 
     chars = []
+    corrupt_glyph_count = 0
+    non_space_count = 0
     for ch in text:
         if ch in ("\n", "\r", "\t"):
             chars.append(ch)
             continue
+        if not ch.isspace():
+            non_space_count += 1
         o = ord(ch)
         if 0xE000 <= o <= 0xF8FF or o < 32 or o == 0x7F:
+            corrupt_glyph_count += 1
             chars.append("\ufffd")
             continue
         try:
             ch.encode("cp1252")
             chars.append(ch)
         except UnicodeEncodeError:
+            corrupt_glyph_count += 1
             chars.append("\ufffd")
     text = "".join(chars)
 
@@ -216,11 +262,20 @@ def normalize_extracted_text(text):
     for pattern, repl in BROKEN_LIGATURE_PATTERNS:
         text = pattern.sub(repl, text)
 
+    # Se uma linha tiver alta densidade de glifos PUA/CID corrompidos (> 25% ou >= 2 seguidos),
+    # substitui por '###' para que is_readable_line bloqueie a linha corrompida sem afetar linhas válidas vizinhas.
+    remaining_repl = text.count("\ufffd")
+    text = re.sub(r"\ufffd{2,}", "###", text)
+    if non_space_count >= 5 and remaining_repl >= 3 and (remaining_repl / non_space_count) > 0.25 and "\n" not in text:
+        return "@@@CORRUPTED_GLYPHS@@@"
+
     # Remove marcadores de nota de rodapé de autor como *1?, *1, 1?, \ufffd isolado, etc.
     text = re.sub(r"\*\d+\s*[?\ufffd]*", "", text)
     text = re.sub(r"\ufffd+", "", text)
     # Remove '?' solto precedido por espaço (ex: ícone de envelope convertido em ' ? ' após nome de autor)
     text = re.sub(r"(?<=\s)\?(?=\s|$)", "", text)
+
+    text = collapse_spaced_letters(text)
 
     for pattern, repl in COMMON_TYPO_FIXES:
         text = pattern.sub(repl, text)
@@ -881,7 +936,7 @@ def strip_editorial_and_english_segments(text):
 
 def is_readable_line(line):
     s = (line or "").strip()
-    if not s:
+    if not s or "@@@CORRUPTED_GLYPHS@@@" in s:
         return False
     if re.match(r"^(p[áa]gina\s*)?\d+(\s*(de|/)\s*\d+)?$", s, re.I):
         return False
@@ -913,7 +968,15 @@ def is_readable_line(line):
             continue
         if re.match(r"^[A-Za-zÀ-ÿ0-9]+(-[A-Za-zÀ-ÿ0-9]+)*$", clean_tok):
             t_vowels = sum(1 for c in clean_tok if c in VOWELS_SET)
-            if len(clean_tok) <= 5 or t_vowels >= 1 or clean_tok.isupper():
+            t_letters = sum(1 for c in clean_tok if c.isalpha())
+            # Bloqueia aglomerados de >= 6 consoantes consecutivas ou mistura anômala letra-dígito-letra-dígito (CMap corrompido)
+            if re.search(r"[bcdfghjklmnpqrstvwxz]{6,}", clean_tok, re.I) or re.search(
+                r"[A-Za-z]\d[A-Za-z]\d", clean_tok
+            ):
+                gibberish_tokens += 1
+            elif t_letters >= 7 and (t_vowels / t_letters) < 0.15:
+                gibberish_tokens += 1
+            elif len(clean_tok) <= 5 or t_vowels >= 1 or (clean_tok.isupper() and len(clean_tok) <= 6):
                 valid_words += 1
             else:
                 gibberish_tokens += 1
@@ -928,7 +991,7 @@ def is_readable_line(line):
 
 
 # ==============================================================================
-# 3.1. RECONSTRUÇÃO DE TABELAS MULTICOLUNAS E REMOÇÃO DE CABEÇALHOS REPETIDOS
+# 3.1. RECONSTRUÇÃO DE TABELAS MULTICOLUNAS, 2 COLUNAS DE PROSA E CABEÇALHOS
 # ==============================================================================
 
 KNOWN_TABLE_HEADERS = [
@@ -940,7 +1003,68 @@ KNOWN_TABLE_HEADERS = [
     ("Lançamento", "CFOP", "Condição adicional", "Gera o evento?"),
     ("Tema", "Chamados (aprox.)"),
     ("Problema relatado", "Causa provável", "Solução / orientação"),
+    ("Conceito", "Definição"),
+    ("Termo", "Significado"),
+    ("Item", "Descrição"),
+    ("Campo", "Descrição"),
+    ("Parâmetro", "Descrição"),
+    ("Problema", "Causa", "Solução"),
 ]
+
+
+def reconstruct_linearized_tables(lines):
+    """
+    Reconstrói tabelas linearizadas (quando o fluxo de texto ou OCR traz os cabeçalhos
+    em linhas consecutivas seguidos das células sem coordenadas X separadas).
+    """
+    if not lines or len(lines) < 4:
+        return lines
+
+    out = []
+    i = 0
+    n = len(lines)
+    known_lower = [tuple(h.lower() for h in hdr) for hdr in KNOWN_TABLE_HEADERS]
+
+    while i < n:
+        matched_headers = None
+        for hdr_tuple, hdr_low in zip(KNOWN_TABLE_HEADERS, known_lower):
+            k = len(hdr_tuple)
+            if i + k <= n:
+                cand = tuple(lines[i + j].replace("##HEADING## ", "").strip().lower() for j in range(k))
+                if cand == hdr_low:
+                    matched_headers = [lines[i + j].replace("##HEADING## ", "").strip() for j in range(k)]
+                    break
+
+        if not matched_headers:
+            out.append(lines[i])
+            i += 1
+            continue
+
+        k = len(matched_headers)
+        i += k
+        row_buf = []
+        while i < n:
+            cur_raw = lines[i]
+            cur_clean = cur_raw.replace("##HEADING## ", "").strip()
+            # Para a tabela linearizada se encontrar um título de seção real ou bullet já formatado
+            if cur_raw.startswith("##HEADING## ") or _is_true_section_heading(cur_raw) or cur_clean.startswith("•"):
+                break
+            # Se estamos no início de uma nova tupla e a linha é um parágrafo longo de prosa (> 175 chars), encerra a tabela
+            if len(row_buf) == 0 and len(cur_clean) > 175 and cur_clean.endswith("."):
+                break
+            row_buf.append(cur_clean)
+            if len(row_buf) == k:
+                lead = row_buf[0]
+                details = [f"{matched_headers[m]}: {row_buf[m]}" for m in range(1, k) if row_buf[m]]
+                out.append(f"• {lead}: {' | '.join(details)}")
+                row_buf = []
+            i += 1
+
+        # Se sobraram células incompletas no fim da tabela, devolve como linhas normais
+        for rem in row_buf:
+            out.append(rem)
+
+    return out
 
 
 def _normalize_header_fingerprint(line):
@@ -982,11 +1106,23 @@ def filter_repeated_running_headers(pages_lines):
     return cleaned_all
 
 
+def _is_table_header_row_texts(texts):
+    if not texts:
+        return False
+    return all(len(c) <= 32 for c in texts if c) and any(
+        k in " ".join(texts).lower()
+        for k in ("tipo", "processo", "opção", "evento", "lançamento", "tema", "problema", "causa", "solução", "conceito", "item", "campo", "parâmetro", "termo")
+    )
+
+
 def extract_structured_lines_from_page_coordinates(page):
     """
     Extrai texto de uma página PDF usando coordenadas (x, y, font_size, bold) via `visitor_text`.
-    Reconstrói células de tabelas multicolunas (evitando embaralhar Coluna 1 + Coluna 2 + Coluna 3
-    da mesma linha Y) e preserva a hierarquia de títulos.
+    Distingue automaticamente:
+      (A) Artigos científicos/acadêmicos em 2 colunas de texto corrido (lendo toda a coluna esquerda
+          de cima para baixo e depois toda a coluna direita de cima para baixo);
+      (B) Tabelas multicolunas de 2, 3 ou 4 colunas (reconstruindo célula por célula, linha por linha);
+      (C) Títulos, listas e parágrafos em coluna única.
     """
     spans = []
 
@@ -1047,8 +1183,9 @@ def extract_structured_lines_from_page_coordinates(page):
                 prev = segments[-1]
                 gap = sp["x"] - prev["x_end"]
                 if gap < 16.0:
-                    sep = "" if (gap < -1.0 or prev["text"].endswith("-")) else " "
-                    prev["text"] = (prev["text"] + sep + sp["text"]).strip()
+                    # Tolerância intrapalavra proporcional à fonte para evitar espaços dentro da mesma palavra (kerning/TJ)
+                    sep = "" if (gap < max(1.2, prev["fs"] * 0.14) or prev["text"].endswith("-")) else " "
+                    prev["text"] = collapse_spaced_letters((prev["text"] + sep + sp["text"]).strip())
                     prev["x_end"] = max(prev["x_end"], sp["x"] + est_w)
                     prev["fs"] = max(prev["fs"], sp["fs"])
                     prev["bold"] = prev["bold"] or sp["bold"]
@@ -1065,7 +1202,7 @@ def extract_structured_lines_from_page_coordinates(page):
                     )
         visual_rows.append({"y": yr["y"], "segments": segments})
 
-    # 3. Reconstrói tabelas multicolunas vs linhas normais de texto
+    # 3. Reconstrói (A) layout de 2 colunas de prosa, (B) tabelas multicolunas ou (C) linhas simples
     out_lines = []
     idx = 0
     n_rows = len(visual_rows)
@@ -1074,7 +1211,63 @@ def extract_structured_lines_from_page_coordinates(page):
         vr = visual_rows[idx]
         segs = vr["segments"]
 
-        # Se a linha tem >= 2 segmentos em colunas X distintas, inicia/continua bloco de tabela
+        # Verifica primeiro se inicia um bloco de PROSA EM 2 COLUNAS (artigo científico/acadêmico)
+        if (
+            len(segs) == 2
+            and segs[0]["x"] < 180.0
+            and segs[1]["x"] >= 230.0
+            and (segs[1]["x"] - segs[0]["x"]) >= 130.0
+            and not _is_table_header_row_texts([s["text"] for s in segs])
+        ):
+            left_anchor = segs[0]["x"]
+            right_anchor = segs[1]["x"]
+            prose_lookahead = []
+            la_idx = idx
+            la_prev_y = vr["y"]
+            two_col_prose_rows = 0
+
+            while la_idx < n_rows:
+                la_vr = visual_rows[la_idx]
+                la_segs = la_vr["segments"]
+                la_dy = la_prev_y - la_vr["y"]
+                if la_idx > idx and la_dy > 26.0:
+                    break
+                if len(la_segs) > 2:
+                    break
+                if len(la_segs) == 1:
+                    s0 = la_segs[0]
+                    # Se for linha de largura total (ex: título de seção atravessando a página), encerra o bloco de 2 colunas
+                    if len(s0["text"]) > 74:
+                        break
+                if len(la_segs) == 2:
+                    if len(la_segs[0]["text"]) >= 28 and len(la_segs[1]["text"]) >= 28:
+                        two_col_prose_rows += 1
+                prose_lookahead.append(la_vr)
+                la_prev_y = la_vr["y"]
+                la_idx += 1
+
+            # Se houver >= 3 linhas duplas de prosa contínua, é um layout de artigo em 2 colunas!
+            if two_col_prose_rows >= 3:
+                left_col_lines = []
+                right_col_lines = []
+                for p_vr in prose_lookahead:
+                    for s in p_vr["segments"]:
+                        txt = s["text"].strip()
+                        formatted = (
+                            f"##HEADING## {txt}"
+                            if (s["fs"] >= 11.8 and len(txt) <= 95 and not txt.endswith("."))
+                            else txt
+                        )
+                        if abs(s["x"] - left_anchor) <= abs(s["x"] - right_anchor):
+                            left_col_lines.append(formatted)
+                        else:
+                            right_col_lines.append(formatted)
+                out_lines.extend(left_col_lines)
+                out_lines.extend(right_col_lines)
+                idx = la_idx
+                continue
+
+        # Se a linha tem >= 2 segmentos em colunas X distintas (e não é prosa de 2 colunas), reconstrói TABELA
         if len(segs) >= 2:
             col_anchors = [s["x"] for s in segs]
             table_logical_rows = []
@@ -1089,35 +1282,26 @@ def extract_structured_lines_from_page_coordinates(page):
                 nxt_segs = nxt_vr["segments"]
                 dy = prev_y - nxt_vr["y"]
 
-                # Sai da tabela se o espaçamento vertical for muito grande (> 28pt)
                 if dy > 28.0:
                     break
 
-                # Se for linha de 1 único segmento alinhado à margem esquerda que é claramente título ou parágrafo longo fora da tabela
                 if len(nxt_segs) == 1:
                     s0 = nxt_segs[0]
                     nearest_col = min(range(len(col_anchors)), key=lambda c: abs(s0["x"] - col_anchors[c]))
                     if abs(s0["x"] - col_anchors[nearest_col]) > 28.0:
                         break
-                    # Se está na coluna 0 mas tem largura total de página (> 75 chars) ou fonte grande de seção
                     if nearest_col == 0 and (len(s0["text"]) > 72 or s0["fs"] >= 11.5):
                         break
 
-                # Se a nova linha tem mais colunas do que o cabeçalho original (ex: tabela de 3 colunas onde linha 1 tinha 2), ajusta âncoras
                 if len(nxt_segs) > len(col_anchors) and len(nxt_segs) <= 4:
                     while len(current_cells) < len(nxt_segs):
                         current_cells.append("")
                     col_anchors = [s["x"] for s in nxt_segs]
 
-                # Decide se `nxt_vr` inicia uma NOVA linha lógica da tabela ou continua as células da linha atual:
-                # Inicia nova linha se:
-                # (a) dy > 15.5pt (gap de borda/padding entre linhas da tabela), OU
-                # (b) >= 2 colunas têm texto na mesma altura Y e a coluna 0 já tinha texto na linha atual
                 starts_new_row = False
                 if dy > 15.5:
                     starts_new_row = True
                 elif len(nxt_segs) >= 2 and current_cells[0]:
-                    # Se a primeira linha da tabela era o cabeçalho (curto), a próxima linha com >=2 colunas é a 1ª linha de dados
                     if len(table_logical_rows) == 0 and all(len(c) < 35 for c in current_cells if c):
                         starts_new_row = True
 
@@ -1128,10 +1312,7 @@ def extract_structured_lines_from_page_coordinates(page):
                 for s in nxt_segs:
                     c_idx = min(range(len(col_anchors)), key=lambda c: abs(s["x"] - col_anchors[c]))
                     if current_cells[c_idx]:
-                        if current_cells[c_idx].endswith("-") and s["text"] and s["text"][0].islower():
-                            current_cells[c_idx] = current_cells[c_idx][:-1] + s["text"]
-                        else:
-                            current_cells[c_idx] += " " + s["text"]
+                        current_cells[c_idx] = safe_dehyphenate_join(current_cells[c_idx], s["text"])
                     else:
                         current_cells[c_idx] = s["text"]
 
@@ -1141,13 +1322,9 @@ def extract_structured_lines_from_page_coordinates(page):
             if any(c.strip() for c in current_cells):
                 table_logical_rows.append([c.strip() for c in current_cells])
 
-            # Formata as linhas da tabela como bullets estruturados claros
             if table_logical_rows:
                 first_row = table_logical_rows[0]
-                is_header = all(len(c) <= 32 for c in first_row if c) and any(
-                    k in " ".join(first_row).lower()
-                    for k in ("tipo", "processo", "opção", "evento", "lançamento", "tema", "problema", "causa", "solução", "conceito", "item")
-                )
+                is_header = _is_table_header_row_texts(first_row)
                 headers = first_row if is_header else None
                 data_rows = table_logical_rows[1:] if is_header else table_logical_rows
 
@@ -1216,6 +1393,9 @@ def clean_and_validate_extracted_text(raw_text, pages_lines=None):
                 filtered_lines.append(ln)
             continue
         filtered_lines.append(ln)
+
+    # Reconstrói tabelas linearizadas (caso o texto tenha vindo sem coordenadas X separadas)
+    filtered_lines = reconstruct_linearized_tables(filtered_lines)
 
     cleaned_text = "\n".join(ln.replace("##HEADING## ", "") for ln in filtered_lines).strip()
     words = re.findall(r"\b[A-Za-zÀ-ÿ]{2,}\b", cleaned_text)
@@ -1430,10 +1610,7 @@ def reflow_pdf_lines_into_sections(readable_lines, fallback_title):
             if "|" in bullet_buffer or (":" in bullet_buffer and len(bullet_buffer) > 45):
                 flush_buffers()
             else:
-                if bullet_buffer.endswith("-") and ln and ln[0].islower():
-                    bullet_buffer = bullet_buffer[:-1] + ln
-                else:
-                    bullet_buffer += " " + ln
+                bullet_buffer = safe_dehyphenate_join(bullet_buffer, ln)
                 if ln.endswith((".", "!", "?", ";")):
                     flush_buffers()
                 continue
@@ -1451,7 +1628,7 @@ def reflow_pdf_lines_into_sections(readable_lines, fallback_title):
             flush_buffers()
 
         if para_buffer and para_buffer[-1].endswith("-") and ln and ln[0].islower():
-            para_buffer[-1] = para_buffer[-1][:-1] + ln
+            para_buffer[-1] = safe_dehyphenate_join(para_buffer[-1], ln)
         else:
             para_buffer.append(ln)
 
@@ -2150,6 +2327,9 @@ NON_CONCEPT_FIRST_WORDS = {
     "nesta", "nesse", "nessa", "no", "na", "nos", "nas", "ao", "à", "aos",
     "às", "pelo", "pela", "pelos", "pelas", "um", "uma", "uns", "umas",
     "você", "confira", "conheça", "veja", "leia", "saiba", "entenda", "aprenda",
+    "posteriormente", "primeiramente", "atualmente", "geralmente", "especialmente",
+    "consequentemente", "historicamente", "etimologicamente", "enquanto",
+    "inicialmente", "finalmente", "outrossim", "ademais", "aliás",
 }
 
 INVALID_CONCEPT_PREFIXES = (

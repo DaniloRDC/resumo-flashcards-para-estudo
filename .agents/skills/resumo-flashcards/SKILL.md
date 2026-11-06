@@ -19,19 +19,21 @@ description: >-
 ### Pipeline Anti-Erro com 3 Agentes Especializados
 
 1. **🛠️ Agente 1 — Agente Construtor (`EstudaPDF-Construtor`):**
-   - Extrai o texto da URL ou PDF resolvendo mapas de fontes (`/ToUnicode` CMap) e ligaduras tipográficas (`fi`, `fl`, `ff`, `ffi`, `ffl`);
-   - Separa rigorosamente metadados editoriais (nomes de autores soltos no topo como *"Saulo Luis Lima da Silva"*, afiliações institucionais como *"Força Aérea Brasileira"*, *"Universidade..."*, datas de submissão/aceite, licenças *Creative Commons*, *DOI* e *Referências Bibliográficas*) do conteúdo didático real;
-   - Reconstrói parágrafos e seções temáticas e redige a versão inicial do **Resumo Estruturado** e dos **Flashcards por Tema**.
+   - Extrai o texto da URL ou PDF resolvendo mapas de fontes (`/ToUnicode` CMap), reparando *mojibake* UTF-8/CP1252, colapsando palavras com espaçamento tipográfico entre letras (`"V I S Ã O  G E R A L"` $\rightarrow$ `"VISÃO GERAL"`), desifenizando quebras de linha sem remover hifens de ênclises (`trata-se`) e expandindo ligaduras tipográficas (`fi`, `fl`, `ff`, `ffi`, `ffl`);
+   - Utiliza coordenadas `(X, Y, tamanho da fonte)` para distinguir **artigos científicos em 2 colunas de prosa** (lendo toda a coluna esquerda de cima para baixo antes da coluna direita) de **tabelas multicolunas de 2, 3 ou 4 colunas** (reconstruindo célula por célula, linha por linha no formato `• Chave: Coluna 2 | Coluna 3`) e reconstrói também **tabelas linearizadas**;
+   - Separa rigorosamente metadados editoriais (nomes de autores soltos no topo como *"Saulo Luis Lima da Silva"*, afiliações institucionais como *"Força Aérea Brasileira"*, *"Universidade..."*, cabeçalhos/rodapés repetidos em múltiplas páginas como *"MicroWork Softwares | 1..11"*, ruídos de portais web como *"Conteúdo feito por humanos"*, *"Tópicos deste artigo"*, datas de submissão/aceite, licenças *Creative Commons*, *DOI* e *Referências Bibliográficas*) do conteúdo didático real;
+   - Reconstrói parágrafos, seções temáticas e pares diretos de `Pergunta? Resposta` (em FAQs e guias técnicos) e redige a versão inicial do **Resumo Estruturado** e dos **Flashcards por Tema**.
 
 2. **🔍 Agente 2 — Agente Revisor (`EstudaPDF-Revisor`):**
-   - Audita linha a linha a visão geral, os parágrafos do resumo, os conceitos-chave e os flashcards antes de gerar o PDF;
-   - Remove qualquer nome de autor do artigo, afiliação institucional, cidade/estado de cabeçalho ou linha de `Palavras-chave:` que tenha vazado no início ou meio das frases;
-   - Corrige eventuais ligaduras quebradas (`?cará` $\rightarrow$ `ficará`, `?loso?a` $\rightarrow$ `filosofia`, `e?caz` $\rightarrow$ `eficaz`) e elimina trechos paralelos em língua estrangeira não solicitada (como *Abstract* e *Keywords* em inglês em artigos em português);
-   - Garante que nenhuma frase termine com palavra cortada ao meio e que todas as perguntas dos flashcards sejam específicas e autossuficientes.
+   - Audita linha a linha a visão geral, os parágrafos do resumo, os conceitos-chave e os flashcards antes de gerar o PDF (tanto no backend Python quanto no motor estático do navegador via `browserAgentReviewer`);
+   - Remove qualquer nome de autor do artigo, afiliação institucional, cidade/estado de cabeçalho, rodapé repetido ou linha de `Palavras-chave:` que tenha vazado no início ou meio das frases, além de deduplicar a Visão Geral na abertura da 1ª seção;
+   - Corrige ligaduras quebradas (`?cará` $\rightarrow$ `ficará`, `?loso?a` $\rightarrow$ `filosofia`, `e?caz` $\rightarrow$ `eficaz`) via *whitelist* morfológica estrita (sem jamais afetar símbolos antes de palavras válidas), converte símbolos fora do CP1252/WinAnsi (`→`, `—`, `–`, `•`, `“`, `”`, `…`, `≥`, `≤`) preservando 100% dos acentos do português em NFC (`0x20..0xFF`), e elimina trechos paralelos em língua estrangeira não solicitada (*Abstract* / *Keywords*);
+   - Garante que nenhuma frase ou resposta de cartão termine truncada em `:` ou com palavra cortada ao meio, descarta falsos conceitos-chave (advérbios, conectivos ou pronomes) e assegura perguntas específicas e autossuficientes.
 
 3. **🧪 Agente 3 — Agente de Teste e Qualidade (`EstudaPDF-Tester`):**
-   - Executa testes automatizados pré e pós-geração do PDF;
-   - Verifica legibilidade da extração, ausência de `?` no meio de palavras, ausência de vazamento de metadados editoriais/autores no resumo, presença de todas as seções obrigatórias, paginação correta e integridade do arquivo PDF gerado em disco antes de liberar a entrega.
+   - Executa testes automatizados pré e pós-geração do PDF (no Python via `agent_tester_validate` e no navegador via `browserAgentTester`);
+   - Bloqueia imediatamente PDFs com fontes CID/CMap corrompidas (alta densidade de glifos PUA/`\ufffd`, aglomerados de $\ge 6$ consoantes consecutivas ou mistura anômala letra-dígito);
+   - Verifica ausência de `?` no meio de palavras, ausência de vazamento de metadados editoriais/autores/rodapés no resumo, presença de todas as seções obrigatórias, paginação correta (Parte 1 antes da Parte 2 em nova página) e integridade do arquivo PDF gerado antes de liberar a entrega.
 
 ---
 

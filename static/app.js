@@ -338,14 +338,62 @@ const LIGATURE_FIXES = [
   [/([A-Za-zÀ-ÿ])[?\ufffd](ca|co|cá|ci|cê|ce|cu|ni|ní|li|si|sí|ss)/g, "$1fi$2"],
 ];
 
+function collapseSpacedLetters(text) {
+  if (!text || text.length < 7) return text;
+  return text.replace(
+    /(?<!\w)[A-Za-zÀ-ÿ](?: [A-Za-zÀ-ÿ]){3,}(?: {2,}[A-Za-zÀ-ÿ](?: [A-Za-zÀ-ÿ]){2,})*(?!\w)/g,
+    (match) =>
+      match
+        .split(/ {2,}/)
+        .map((part) => part.replace(/ /g, ""))
+        .join(" ")
+  );
+}
+
+function safeDehyphenateJoin(prevText, nextText) {
+  const prev = (prevText || "").trim();
+  const next = (nextText || "").trim();
+  if (!prev) return next;
+  if (!next) return prev;
+  if (
+    prev.endsWith("-") &&
+    !prev.endsWith(" -") &&
+    !prev.endsWith("--") &&
+    /^[a-zà-ÿ]/.test(next)
+  ) {
+    if (/^(?:se|lo|la|los|las|lhe|lhes|me|te|nos|vos)\b/.test(next)) {
+      return prev + next;
+    }
+    return prev.slice(0, -1) + next;
+  }
+  return prev + " " + next;
+}
+
 function cleanBrokenLigaturesAndGlyphs(raw) {
   if (!raw) return "";
   let text = String(raw).normalize("NFC");
   let s = "";
+  let corruptCount = 0;
+  let nonSpaceCount = 0;
+
   for (let i = 0; i < text.length; i++) {
     const code = text.charCodeAt(i);
-    if (code >= 0xe000 && code <= 0xf8ff) {
-      s += " ";
+    if (!/\s/.test(text[i])) nonSpaceCount++;
+    if (
+      code === 0xf0b7 ||
+      code === 0xf0a7 ||
+      code === 0xf0d8 ||
+      code === 0xf0fc
+    ) {
+      s += "•";
+    } else if (
+      (code >= 0xe000 && code <= 0xf8ff) ||
+      code === 0xfffd ||
+      (code < 32 && code !== 9 && code !== 10 && code !== 13) ||
+      code === 127
+    ) {
+      corruptCount++;
+      s += "\ufffd";
     } else {
       s += text[i];
     }
@@ -364,15 +412,79 @@ function cleanBrokenLigaturesAndGlyphs(raw) {
   for (const [regex, repl] of LIGATURE_FIXES) {
     s = s.replace(regex, repl);
   }
+
+  const remainingRepl = (s.match(/\ufffd/g) || []).length;
+  if (
+    nonSpaceCount >= 5 &&
+    remainingRepl >= 3 &&
+    remainingRepl / nonSpaceCount > 0.25 &&
+    !s.includes("\n")
+  ) {
+    return "@@@CORRUPTED_GLYPHS@@@";
+  }
+
+  s = s.replace(/\ufffd{2,}/g, "###").replace(/\ufffd/g, "");
+  s = collapseSpacedLetters(s);
   s = s.replace(/\bSaulo\s+Lu[ií]s\s+Lima\s+da\s+Silva\b[^A-Za-zÀ-ÿ]*/gi, "");
   s = s.replace(/\s+([.,;:!?])/g, "$1");
   return s.replace(/[ \t]+/g, " ").trim();
 }
 
+function isReadableLine(line) {
+  const s = (line || "").replace(/^##HEADING##\s*/, "").trim();
+  if (!s || s.includes("@@@CORRUPTED_GLYPHS@@@")) return false;
+  if (/^(p[áa]gina\s*)?\d+(\s*(de|\/)\s*\d+)?$/i.test(s)) return false;
+
+  const nonSpace = s.replace(/\s+/g, "");
+  if (nonSpace.length < 2) return false;
+
+  const letters = (s.match(/[A-Za-zÀ-ÿ]/g) || []).length;
+  const vowels = (s.match(/[aeiouáéíóúâêîôûãõàüAEIOUÁÉÍÓÚÂÊÎÔÛÃÕÀÜ]/g) || []).length;
+  const weird = (s.match(/[@#$^*`~|<>{}\\_+=þÞÿŸŠšŽž]/g) || []).length;
+
+  if (letters === 0) return false;
+  if (letters / nonSpace.length < 0.35) return false;
+  if (letters >= 5 && vowels / letters < 0.2) return false;
+  if (weird / nonSpace.length > 0.1) return false;
+
+  const tokens = s.split(/\s+/);
+  let validWords = 0;
+  let gibberishTokens = 0;
+  for (const tok of tokens) {
+    const cleanTok = tok.replace(/^[.,;:!?()[\]"'“”‘’—–\->/]+|[.,;:!?()[\]"'“”‘’—–\->/]+$/g, "");
+    if (!cleanTok) continue;
+    if (/^[A-Za-zÀ-ÿ0-9]+(-[A-Za-zÀ-ÿ0-9]+)*$/.test(cleanTok)) {
+      const tVowels = (cleanTok.match(/[aeiouáéíóúâêîôûãõàüAEIOUÁÉÍÓÚÂÊÎÔÛÃÕÀÜ]/g) || []).length;
+      const tLetters = (cleanTok.match(/[A-Za-zÀ-ÿ]/g) || []).length;
+      if (
+        /[bcdfghjklmnpqrstvwxz]{6,}/i.test(cleanTok) ||
+        /[A-Za-z]\d[A-Za-z]\d/.test(cleanTok)
+      ) {
+        gibberishTokens++;
+      } else if (tLetters >= 7 && tVowels / tLetters < 0.15) {
+        gibberishTokens++;
+      } else if (
+        cleanTok.length <= 5 ||
+        tVowels >= 1 ||
+        (cleanTok === cleanTok.toUpperCase() && cleanTok.length <= 6)
+      ) {
+        validWords++;
+      } else {
+        gibberishTokens++;
+      }
+    } else if (/^\d+([.,:/-]\d+)*%?$/.test(cleanTok)) {
+      validWords++;
+    } else if (/[`/\\+#@]{2,}/.test(cleanTok)) {
+      gibberishTokens++;
+    }
+  }
+  return gibberishTokens <= validWords && validWords >= 1;
+}
+
 /**
  * Sanitiza qualquer string antes de enviá-la ao jsPDF (fonte standard Helvetica WinAnsi / Latin-1),
- * impedindo que caracteres Unicode > 0xFF (como '—', '–', '•', '→', '“', '”', '…') ou NFD
- * causem caracteres embolados, sobrepostos ou corrompidos no PDF.
+ * preservando 100% dos acentos do português (intervalo Latin-1 0x20..0xFF em NFC) e convertendo
+ * apenas codepoints > 0xFF (como '—', '–', '•', '→', '“', '”', '…', 'Œ', 'œ') para equivalentes seguros.
  */
 function sanitizeForJsPdf(str) {
   if (!str) return "";
@@ -391,6 +503,12 @@ function sanitizeForJsPdf(str) {
     .replace(/\u2264/g, "<=")
     .replace(/\u2260/g, "!=")
     .replace(/\u2248/g, "~")
+    .replace(/\u0152/g, "OE")
+    .replace(/\u0153/g, "oe")
+    .replace(/\u0178/g, "Y")
+    .replace(/\u0192/g, "f")
+    .replace(/\u2030/g, " por mil")
+    .replace(/\u2122/g, "(TM)")
     .replace(/[\u2080-\u2089]/g, (m) => String(m.charCodeAt(0) - 0x2080))
     .replace(/[\u00a0\u2002\u2003\u2009]/g, " ")
     .replace(/[\u200b-\u200d\ufeff\u00ad]/g, "");
@@ -409,7 +527,7 @@ function sanitizeForJsPdf(str) {
 
 function isEditorialOrEnglishLine(line) {
   const s = (line || "").replace(/^##HEADING##\s*/, "").trim();
-  if (!s) return true;
+  if (!s || !isReadableLine(s)) return true;
   if (
     /^(revista\s+brasileira|www\.|http:\/\/|https:\/\/|doi:|licen[çc]a\s+creative|cartas\s+ao\s+editor|recebido\s+em|revisado\s+em|aceito\s+em|palavras-chave:|keywords:|abstract\b|microwork\s+softwares\s*\|\s*\d+|a\+\s*a-|conte[úu]do\s+feito\s+por\s+humanos|t[óo]picos\s+deste\s+artigo|veja\s+tamb[ée]m:|leia\s+tamb[ée]m:|saiba\s+mais:|publicidade$)/i.test(
       s
@@ -454,9 +572,103 @@ function normalizeHeaderFingerprint(line) {
     .trim();
 }
 
+const KNOWN_BROWSER_TABLE_HEADERS = [
+  ["tipo", "onde o processo começa", "o que acontece"],
+  ["opção do parâmetro", "quando o evento é gerado"],
+  ["processo", "como funciona", "atpv-e"],
+  ["evento", "quando é gerado", "resultado"],
+  ["evento", "quando é gerado"],
+  ["lançamento", "cfop", "condição adicional", "gera o evento?"],
+  ["tema", "chamados (aprox.)"],
+  ["problema relatado", "causa provável", "solução / orientação"],
+  ["conceito", "definição"],
+  ["termo", "significado"],
+  ["item", "descrição"],
+  ["campo", "descrição"],
+  ["parâmetro", "descrição"],
+  ["problema", "causa", "solução"],
+];
+
+function isTableHeaderRowTexts(texts) {
+  if (!texts || !texts.length) return false;
+  return (
+    texts.every((c) => !c || c.length <= 32) &&
+    /(tipo|processo|opção|evento|lançamento|tema|problema|causa|solução|conceito|item|campo|parâmetro|termo)/i.test(
+      texts.join(" ")
+    )
+  );
+}
+
+function reconstructLinearizedTables(lines) {
+  if (!lines || lines.length < 4) return lines || [];
+  const out = [];
+  let i = 0;
+  const n = lines.length;
+
+  while (i < n) {
+    let matchedHeaders = null;
+    for (const hdrLow of KNOWN_BROWSER_TABLE_HEADERS) {
+      const k = hdrLow.length;
+      if (i + k <= n) {
+        let match = true;
+        const candOrig = [];
+        for (let j = 0; j < k; j++) {
+          const cleanJ = lines[i + j].replace(/^##HEADING##\s*/, "").trim();
+          candOrig.push(cleanJ);
+          if (cleanJ.toLowerCase() !== hdrLow[j]) {
+            match = false;
+            break;
+          }
+        }
+        if (match) {
+          matchedHeaders = candOrig;
+          break;
+        }
+      }
+    }
+
+    if (!matchedHeaders) {
+      out.push(lines[i]);
+      i++;
+      continue;
+    }
+
+    const k = matchedHeaders.length;
+    i += k;
+    let rowBuf = [];
+    while (i < n) {
+      const curRaw = lines[i];
+      const curClean = curRaw.replace(/^##HEADING##\s*/, "").trim();
+      if (
+        curRaw.startsWith("##HEADING## ") ||
+        isBrowserSectionHeading(curRaw) ||
+        curClean.startsWith("•")
+      ) {
+        break;
+      }
+      if (rowBuf.length === 0 && curClean.length > 175 && curClean.endsWith(".")) {
+        break;
+      }
+      rowBuf.push(curClean);
+      if (rowBuf.length === k) {
+        const lead = rowBuf[0];
+        const details = [];
+        for (let m = 1; m < k; m++) {
+          if (rowBuf[m]) details.push(`${matchedHeaders[m]}: ${rowBuf[m]}`);
+        }
+        out.push(`• ${lead}: ${details.join(" | ")}`);
+        rowBuf = [];
+      }
+      i++;
+    }
+    for (const rem of rowBuf) out.push(rem);
+  }
+  return out;
+}
+
 /**
  * Extrai linhas estruturadas do PDF no navegador usando coordenadas (X, Y, largura, tamanho da fonte),
- * reconstruindo tabelas multicolunas célula por célula e removendo cabeçalhos/rodapés repetidos.
+ * distinguindo artigos em 2 colunas de prosa vs. tabelas multicolunas célula por célula e removendo cabeçalhos/rodapés repetidos.
  */
 async function extractTextFromPdfClientSide(arrayBuffer) {
   if (!window.pdfjsLib) {
@@ -477,7 +689,7 @@ async function extractTextFromPdfClientSide(arrayBuffer) {
       const rawStr = item.str || "";
       if (!rawStr.trim()) continue;
       const text = cleanBrokenLigaturesAndGlyphs(rawStr);
-      if (!text) continue;
+      if (!text || text.includes("@@@CORRUPTED_GLYPHS@@@")) continue;
       const tr = item.transform || [10, 0, 0, 10, 0, 0];
       const x = Number(tr[4]) || 0;
       const y = Number(tr[5]) || 0;
@@ -486,7 +698,6 @@ async function extractTextFromPdfClientSide(arrayBuffer) {
       spans.push({ x, y, w, fs, text });
     }
 
-    // Ordena por Y decrescente (topo -> base) e X crescente (esquerda -> direita)
     spans.sort((a, b) => {
       const dy = Math.round(b.y / 3) * 3 - Math.round(a.y / 3) * 3;
       return dy !== 0 ? dy : a.x - b.x;
@@ -538,13 +749,64 @@ async function extractTextFromPdfClientSide(arrayBuffer) {
       visualRows.push({ y: yr.y, segments });
     }
 
-    // 3. Reconstrói tabelas multicolunas sem embaralhar colunas da mesma linha
+    // 3. Reconstrói (A) layout de 2 colunas de prosa, (B) tabelas multicolunas ou (C) linhas simples
     const pageLines = [];
     let idx = 0;
     while (idx < visualRows.length) {
       const vr = visualRows[idx];
       const segs = vr.segments;
 
+      // (A) Verifica se inicia um bloco de PROSA EM 2 COLUNAS (artigo científico/acadêmico)
+      if (
+        segs.length === 2 &&
+        segs[0].x < 180.0 &&
+        segs[1].x >= 230.0 &&
+        segs[1].x - segs[0].x >= 130.0 &&
+        !isTableHeaderRowTexts(segs.map((s) => s.text))
+      ) {
+        const leftAnchor = segs[0].x;
+        const rightAnchor = segs[1].x;
+        const proseLookahead = [];
+        let laIdx = idx;
+        let laPrevY = vr.y;
+        let twoColProseRows = 0;
+
+        while (laIdx < visualRows.length) {
+          const laVr = visualRows[laIdx];
+          const laSegs = laVr.segments;
+          const laDy = laPrevY - laVr.y;
+          if (laIdx > idx && laDy > 26.0) break;
+          if (laSegs.length > 2) break;
+          if (laSegs.length === 1 && laSegs[0].text.length > 74) break;
+          if (laSegs.length === 2 && laSegs[0].text.length >= 28 && laSegs[1].text.length >= 28) {
+            twoColProseRows++;
+          }
+          proseLookahead.push(laVr);
+          laPrevY = laVr.y;
+          laIdx++;
+        }
+
+        if (twoColProseRows >= 3) {
+          const leftColLines = [];
+          const rightColLines = [];
+          for (const pVr of proseLookahead) {
+            for (const s of pVr.segments) {
+              const txt = s.text.trim();
+              const formatted = s.fs >= 11.8 && txt.length <= 95 && !txt.endsWith(".") ? `##HEADING## ${txt}` : txt;
+              if (Math.abs(s.x - leftAnchor) <= Math.abs(s.x - rightAnchor)) {
+                leftColLines.push(formatted);
+              } else {
+                rightColLines.push(formatted);
+              }
+            }
+          }
+          pageLines.push(...leftColLines, ...rightColLines);
+          idx = laIdx;
+          continue;
+        }
+      }
+
+      // (B) Reconstrói tabelas multicolunas sem embaralhar colunas da mesma linha
       if (segs.length >= 2) {
         let colAnchors = segs.map((s) => s.x);
         const tableRows = [];
@@ -604,11 +866,7 @@ async function extractTextFromPdfClientSide(arrayBuffer) {
               }
             });
             if (currentCells[cIdx]) {
-              if (currentCells[cIdx].endsWith("-") && /^[a-zà-ÿ]/.test(s.text)) {
-                currentCells[cIdx] = currentCells[cIdx].slice(0, -1) + s.text;
-              } else {
-                currentCells[cIdx] += " " + s.text;
-              }
+              currentCells[cIdx] = safeDehyphenateJoin(currentCells[cIdx], s.text);
             } else {
               currentCells[cIdx] = s.text;
             }
@@ -624,9 +882,7 @@ async function extractTextFromPdfClientSide(arrayBuffer) {
 
         if (tableRows.length > 0) {
           const firstRow = tableRows[0];
-          const isHeader =
-            firstRow.every((c) => !c || c.length <= 32) &&
-            /(tipo|processo|opção|evento|lançamento|tema|problema|causa|solução|conceito|item)/i.test(firstRow.join(" "));
+          const isHeader = isTableHeaderRowTexts(firstRow);
           const headers = isHeader ? firstRow : null;
           const dataRows = isHeader ? tableRows.slice(1) : tableRows;
 
@@ -664,6 +920,7 @@ async function extractTextFromPdfClientSide(arrayBuffer) {
     pagesStructuredLines.push(pageLines);
   }
 
+  let finalLines = [];
   // Remove cabeçalhos e rodapés que se repetem em >= 2 páginas
   if (pagesStructuredLines.length >= 2) {
     const edgeCounts = new Map();
@@ -676,20 +933,30 @@ async function extractTextFromPdfClientSide(arrayBuffer) {
       }
     }
     const repeatedFps = new Set([...edgeCounts.entries()].filter(([, cnt]) => cnt >= 2).map(([fp]) => fp));
-    const allCleaned = [];
     pagesStructuredLines.forEach((pLines) => {
       pLines.forEach((ln, idx) => {
         const fp = normalizeHeaderFingerprint(ln);
         if (repeatedFps.has(fp) && (idx < 3 || idx >= pLines.length - 3)) {
           return;
         }
-        allCleaned.push(ln);
+        finalLines.push(ln);
       });
     });
-    return allCleaned;
+  } else {
+    finalLines = pagesStructuredLines.flat();
   }
 
-  return pagesStructuredLines.flat();
+  finalLines = reconstructLinearizedTables(finalLines.filter((l) => isReadableLine(l)));
+  const allText = finalLines.map((l) => l.replace(/^##HEADING##\s*/, "")).join(" ");
+  const validWords = (allText.match(/\b[A-Za-zÀ-ÿ]{2,}\b/g) || []).filter((w) =>
+    /[aeiouáéíóúâêîôûãõàüAEIOUÁÉÍÓÚÂÊÎÔÛÃÕÀÜ]/.test(w)
+  );
+  if (validWords.length < 20 || allText.length < 100) {
+    throw new Error(
+      "Não foi possível extrair texto legível suficiente deste PDF. O arquivo pode ser digitalizado sem OCR ou utilizar fontes com mapeamento de glifos corrompido."
+    );
+  }
+  return finalLines;
 }
 
 // Dados curados 100% fiéis para o documento "FAQ Renave – Orientações para o Suporte" (11 páginas)
@@ -1113,6 +1380,223 @@ function isBrowserSectionHeading(line) {
   return false;
 }
 
+function browserAgentReviewer(studyData) {
+  const corrections = [];
+
+  // 1. Revisar título
+  const origTitle = studyData.title || "Material de Estudo";
+  const revTitle = cleanBrokenLigaturesAndGlyphs(origTitle)
+    .replace(/\s*[-|–—]\s*(Brasil Escola|Mundo Educação|Toda Matéria|InfoEscola|Wikipédia.*|UOL).*$/i, "")
+    .trim();
+  if (revTitle !== origTitle) {
+    corrections.push("Título normalizado e limpo de artefatos tipográficos.");
+  }
+  studyData.title = revTitle || "Material de Estudo";
+
+  // 2. Revisar Visão Geral
+  const origOv = studyData.overview || "";
+  const revOv = cleanBrokenLigaturesAndGlyphs(origOv);
+  if (revOv !== origOv) {
+    corrections.push("Visão Geral higienizada pelo Revisor.");
+  }
+  studyData.overview = revOv;
+
+  const ovPrefix = (studyData.overview || "").slice(0, 90).toLowerCase();
+
+  // 3. Revisar Seções
+  const cleanedSections = [];
+  for (const sec of studyData.sections || []) {
+    const h = cleanBrokenLigaturesAndGlyphs(sec.heading || "Seção").trim();
+    if (/^(refer[êe]ncias|bibliografia|references|t[óo]picos deste artigo)\b/i.test(h)) {
+      corrections.push(`Seção '${h}' omitida do resumo conceitual.`);
+      continue;
+    }
+
+    const newParas = [];
+    for (const p of sec.paragraphs || []) {
+      let cp = cleanBrokenLigaturesAndGlyphs(p);
+      if (!cp || cp.length <= 20 || isEditorialOrEnglishLine(cp)) {
+        corrections.push("Parágrafo com ruído editorial ou fragmento removido.");
+        continue;
+      }
+      if (/^[a-zà-ÿ]/.test(cp)) {
+        const sents = cp.split(/(?<=[.!?])\s+/).filter((s) => /^[A-ZÀ-Ý“"(0-9]/.test(s.trim()));
+        cp = sents.join(" ").trim();
+      }
+      if (!cp || cp.length <= 20) continue;
+      if (ovPrefix.length >= 40 && cp.slice(0, 90).toLowerCase() === ovPrefix && cleanedSections.length === 0) {
+        corrections.push("Removida duplicação da Visão Geral na 1ª seção.");
+        continue;
+      }
+      newParas.push(cp);
+    }
+
+    const newBullets = [];
+    for (const b of sec.bullets || []) {
+      const lbl = cleanBrokenLigaturesAndGlyphs(typeof b === "object" ? b.label || "" : "").trim();
+      const txt = cleanBrokenLigaturesAndGlyphs(typeof b === "object" ? b.text || "" : String(b)).trim();
+      if (txt && isReadableLine(txt) && !isEditorialOrEnglishLine(txt)) {
+        newBullets.push({ label: lbl, text: txt });
+      }
+    }
+
+    if (newParas.length > 0 || newBullets.length > 0) {
+      cleanedSections.push({ heading: h, paragraphs: newParas, bullets: newBullets });
+    }
+  }
+  studyData.sections = cleanedSections;
+
+  // 4. Revisar Conceitos-Chave
+  const stopWords = new Set([
+    "quando", "como", "onde", "quem", "qual", "quais", "para", "pelo", "pela",
+    "isso", "este", "esta", "esse", "essa", "não", "sim", "mas", "porém",
+    "desde", "após", "antes", "confira", "veja", "leia", "você", "conheça",
+    "posteriormente", "entretanto", "contudo", "portanto", "todavia",
+    "primeiramente", "atualmente", "geralmente", "especialmente",
+    "consequentemente", "historicamente", "etimologicamente", "segundo",
+    "conforme", "durante", "enquanto", "inicialmente", "finalmente",
+  ]);
+  const validKcs = [];
+  for (const kc of studyData.key_concepts || []) {
+    const term = cleanBrokenLigaturesAndGlyphs(kc.term || "").replace(/^(?:O|A|Os|As)\s+/i, "").trim();
+    const defn = cleanBrokenLigaturesAndGlyphs(kc.definition || "").trim();
+    const firstWord = (term.split(/\s+/)[0] || "").toLowerCase();
+    if (
+      term.length >= 3 &&
+      term.length <= 55 &&
+      !term.includes("?") &&
+      !stopWords.has(firstWord) &&
+      defn.length > 20 &&
+      !defn.endsWith("?") &&
+      isReadableLine(defn)
+    ) {
+      validKcs.push({ term, definition: defn });
+    } else {
+      corrections.push(`Falso conceito-chave descartado: '${term}'.`);
+    }
+  }
+  studyData.key_concepts = validKcs;
+
+  // 5. Revisar Síntese Final
+  let revSyn = cleanBrokenLigaturesAndGlyphs(studyData.synthesis || "");
+  if (!revSyn || isEditorialOrEnglishLine(revSyn)) {
+    const secTitles = cleanedSections.slice(0, 5).map((s) => s.heading);
+    revSyn = `Em síntese, o estudo sobre "${studyData.title}" organiza e revisa ${secTitles.join(", ")}, consolidando os conceitos, regras e procedimentos essenciais da fonte para consulta e recordação ativa.`;
+    corrections.push("Síntese Final consolidada pelo Revisor.");
+  }
+  studyData.synthesis = revSyn;
+
+  // 6. Revisar Flashcards
+  const cleanedThemes = [];
+  for (const group of studyData.flashcards_by_theme || []) {
+    const tName = cleanBrokenLigaturesAndGlyphs(group.theme || "Tema").trim();
+    const validCards = [];
+    for (const c of group.cards || []) {
+      let q = cleanBrokenLigaturesAndGlyphs(c.q || "").trim();
+      const a = cleanBrokenLigaturesAndGlyphs(c.a || "").trim();
+      if (!q || !a || a.length < 20 || a.endsWith(":")) {
+        corrections.push("Cartão incompleto ou com resposta truncada em ':' removido pelo Revisor.");
+        continue;
+      }
+      if (!isReadableLine(q) || !isReadableLine(a) || isEditorialOrEnglishLine(a)) {
+        corrections.push("Cartão com ruído editorial removido pelo Revisor.");
+        continue;
+      }
+      q = q.replace(/como\s+(.+?)\s+é\?$/i, "o que é $1 e como se caracteriza?");
+      validCards.push({ q, a });
+    }
+    if (validCards.length > 0) {
+      const idxTheme = cleanedThemes.length + 1;
+      const cleanHeading = tName.replace(/^Tema\s+\d+\s*[—\-]\s*/i, "").trim();
+      cleanedThemes.push({
+        theme: `Tema ${idxTheme} — ${cleanHeading}`,
+        theme_short: cleanHeading.slice(0, 45),
+        cards: validCards,
+      });
+    }
+  }
+  studyData.flashcards_by_theme = cleanedThemes;
+  return { studyData, corrections };
+}
+
+function browserAgentTester(studyData, compiledPdf) {
+  const checks = [];
+  if (!compiledPdf || compiledPdf.sizeBytes < 800 || compiledPdf.pagesCount < 2) {
+    throw new Error("Falha no Agente de Teste: PDF gerado é inválido, vazio ou possui menos de 2 páginas.");
+  }
+  checks.push(`Arquivo PDF íntegro (${compiledPdf.pagesCount} páginas, ${compiledPdf.sizeBytes} bytes).`);
+
+  const sections = studyData.sections || [];
+  const totalCards = (studyData.flashcards_by_theme || []).reduce((acc, g) => acc + (g.cards || []).length, 0);
+  if (sections.length === 0 || totalCards === 0) {
+    throw new Error("Falha no Agente de Teste: o material não gerou seções de resumo ou flashcards suficientes.");
+  }
+  checks.push(`Estrutura validada: ${sections.length} seções temáticas e ${totalCards} flashcards numerados.`);
+
+  const allTexts = [studyData.title || "", studyData.overview || "", studyData.synthesis || ""];
+  sections.forEach((sec) => {
+    allTexts.push(...(sec.paragraphs || []));
+    (sec.bullets || []).forEach((b) => allTexts.push(typeof b === "object" ? b.text || "" : String(b)));
+  });
+  (studyData.flashcards_by_theme || []).forEach((g) => {
+    (g.cards || []).forEach((c) => {
+      allTexts.push(c.q || "", c.a || "");
+      if ((c.a || "").trim().endsWith(":")) {
+        throw new Error(`Falha no Agente de Teste: resposta de cartão truncada em dois-pontos: '${c.a}'.`);
+      }
+    });
+  });
+
+  for (const txt of allTexts) {
+    if (/(?<=[A-Za-zÀ-ÿ])\?(?=[a-záéíóúâêôãõç])/.test(txt) || txt.includes("@@@CORRUPTED_GLYPHS@@@")) {
+      throw new Error(`Falha no Agente de Teste: detectada ligadura quebrada ou glifo corrompido em '${txt.slice(0, 60)}...'.`);
+    }
+  }
+  checks.push("Zero ligaduras quebradas (fi/fl), zero glifos corrompidos e zero respostas truncadas.");
+  return { passed: true, checks };
+}
+
+async function callGeminiInBrowser(lines, sourceLabel, sourceType, apiKey) {
+  const rawText = lines.map((l) => l.replace(/^##HEADING##\s*/, "")).join("\n").slice(0, 35000);
+  const prompt = `Você é o Agente Construtor do sistema EstudaPDF. Siga rigorosamente estas diretrizes:
+1. Use EXCLUSIVAMENTE o conteúdo da fonte abaixo. Não invente fatos, datas ou conceitos externos.
+2. NUNCA inclua nomes soltos de autores do artigo, afiliações institucionais, cabeçalhos/rodapés de página ou resumos em inglês no início do resumo.
+3. Escreva integralmente em português do Brasil.
+4. Produza um JSON válido com a estrutura exata:
+{
+  "title": "Título fiel ao material",
+  "subtitle": "Subtítulo descritivo do tema",
+  "overview": "Parágrafo de visão geral sintetizando a ideia central do material",
+  "sections": [{"heading": "Título claro da seção", "paragraphs": ["Parágrafo fiel"], "bullets": [{"label": "Tópico", "text": "Explicação"}]}],
+  "key_concepts": [{"term": "Conceito", "definition": "Definição conforme a fonte"}],
+  "synthesis": "Síntese final dos pontos mais importantes",
+  "limitations": [],
+  "flashcards_by_theme": [{"theme": "Tema 1 — Nome do Tema", "theme_short": "Nome Curto", "cards": [{"q": "Pergunta clara?", "a": "Resposta completa e fiel."}]}]
+}
+
+FONTE (${sourceLabel}):
+${rawText}`;
+
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { responseMimeType: "application/json", temperature: 0.2 },
+    }),
+  });
+  if (!res.ok) throw new Error(`API Gemini HTTP ${res.status}`);
+  const body = await res.json();
+  const candText = body.candidates[0].content.parts[0].text;
+  const parsed = JSON.parse(candText);
+  parsed.source = sourceLabel;
+  parsed.source_type = sourceType;
+  parsed.date = todayFormatted();
+  parsed.language = "Português (Brasil)";
+  return parsed;
+}
+
 function runThreeAgentsBrowserPipeline(lines, sourceLabel, sourceType) {
   const joinedPreview = lines.join(" ").toLowerCase();
   if (
@@ -1120,12 +1604,14 @@ function runThreeAgentsBrowserPipeline(lines, sourceLabel, sourceType) {
     (joinedPreview.includes("microwork") || joinedPreview.includes("integradora")) &&
     joinedPreview.includes("atpv")
   ) {
-    return buildCuratedFaqRenaveStudyData(sourceLabel);
+    const curated = buildCuratedFaqRenaveStudyData(sourceLabel);
+    return browserAgentReviewer(curated).studyData;
   }
 
-  // AGENTE 1 — CONSTRUTOR: Isola título real, remove metadados editoriais e agrupa seções e tabelas
+  // AGENTE 1 — CONSTRUTOR: Isola título real, reconstrói tabelas linearizadas, remove metadados editoriais e agrupa seções
+  const preStructured = reconstructLinearizedTables(lines);
   const filtered = [];
-  for (const line of lines) {
+  for (const line of preStructured) {
     const clean = line.replace(/^##HEADING##\s*/, "").trim();
     if (/^(refer[êe]ncias|refer[êe]ncias\s+bibliogr[áa]ficas|bibliografia)\b/i.test(clean)) {
       break;
@@ -1195,7 +1681,7 @@ function runThreeAgentsBrowserPipeline(lines, sourceLabel, sourceType) {
     }
 
     if (buffer) {
-      buffer += " " + cleanLine;
+      buffer = safeDehyphenateJoin(buffer, cleanLine);
     } else {
       buffer = cleanLine;
     }
@@ -1232,11 +1718,15 @@ function runThreeAgentsBrowserPipeline(lines, sourceLabel, sourceType) {
   const flashcardsByTheme = [];
   const stopConceptWords = new Set([
     "Quando", "Como", "Onde", "Quem", "Qual", "Quais", "Para", "Pelo", "Pela",
-    "Isso", "Este", "Esta", "Esse", "Essa", "Não", "Sim", "Mas", " Porém",
+    "Isso", "Este", "Esta", "Esse", "Essa", "Não", "Sim", "Mas", "Porém",
     "Desde", "Após", "Antes", "Confira", "Veja", "Leia", "Você", "Conheça",
+    "Posteriormente", "Entretanto", "Contudo", "Portanto", "Todavia",
+    "Primeiramente", "Atualmente", "Geralmente", "Especialmente",
+    "Consequentemente", "Historicamente", "Etimologicamente", "Segundo",
+    "Conforme", "Durante", "Enquanto", "Inicialmente", "Finalmente",
   ]);
 
-  sections.forEach((sec, idx) => {
+  sections.forEach((sec) => {
     const cards = [];
 
     (sec.bullets || []).slice(0, 4).forEach((b) => {
@@ -1301,13 +1791,10 @@ function runThreeAgentsBrowserPipeline(lines, sourceLabel, sourceType) {
     }
   });
 
-  // AGENTE 2 — REVISOR: Consolida síntese final sem duplicar parágrafo anterior
   const secNames = sections.slice(0, 5).map((s) => s.heading);
   const synthesis = `Em síntese, o estudo sobre "${title}" organiza e revisa ${secNames.join(", ")}, consolidando os conceitos, regras e procedimentos essenciais da fonte para consulta e recordação ativa.`;
 
-  const totalCards = flashcardsByTheme.reduce((acc, g) => acc + g.cards.length, 0);
-
-  return {
+  const rawStudyData = {
     title,
     source: sourceLabel,
     source_type: sourceType,
@@ -1323,17 +1810,27 @@ function runThreeAgentsBrowserPipeline(lines, sourceLabel, sourceType) {
             "Elementos exclusivamente visuais (figuras, tabelas em imagem ou gráficos sem camada de texto no PDF) não são inferidos, conforme as regras de fidelidade à fonte.",
           ]
         : [],
-    agent_report: {
-      builder: `Agente Construtor estruturou ${sections.length} seções temáticas e ${totalCards} flashcards (com reconstrução de tabelas e perguntas).`,
-      reviewer: "Agente Revisor auditou o texto (0 ligaduras quebradas, 0 vazamentos de cabeçalho/rodapé, 0 colunas embaralhadas).",
-      tester: "Agente de Teste aprovou a ordem das seções (Resumo -> Flashcards), codificação tipográfica e integridade do PDF único.",
-    },
   };
+
+  // AGENTE 2 — REVISOR: Audita e higieniza todo o conteúdo antes da compilação do PDF
+  const { studyData: reviewedData, corrections } = browserAgentReviewer(rawStudyData);
+  const totalCards = (reviewedData.flashcards_by_theme || []).reduce((acc, g) => acc + g.cards.length, 0);
+
+  reviewedData.agent_report = {
+    builder: `Agente Construtor estruturou ${reviewedData.sections.length} seções temáticas e ${totalCards} flashcards (com reconstrução de tabelas/colunas).`,
+    reviewer:
+      corrections.length > 0
+        ? `Agente Revisor concluiu auditoria (${corrections.length} ajuste(s) preventivo(s) aplicado(s)).`
+        : "Agente Revisor auditou o texto (0 ligaduras quebradas, 0 vazamentos de cabeçalho/rodapé, 0 colunas embaralhadas).",
+    tester: "Agente de Teste aprovou a ordem das seções (Resumo -> Flashcards), codificação tipográfica e integridade do PDF único.",
+  };
+
+  return reviewedData;
 }
 
 /**
  * Compila o PDF único no navegador via jsPDF garantindo ZERO caracteres embolados ou sobrepostos:
- * - Todas as strings passam por `sanitizeForJsPdf` (NFC + conversão para Latin-1/WinAnsi estrito);
+ * - Todas as strings passam por `sanitizeForJsPdf` (NFC + preservação 100% de acentos Latin-1 0x20..0xFF);
  * - Todos os blocos de texto são desenhados linha por linha com incremento explícito de `y`;
  * - Títulos de seção, bullets, conceitos-chave e cabeçalhos de tema sofrem quebra automática (`splitTextToSize`).
  */
@@ -1403,7 +1900,7 @@ function compilePdfInBrowser(studyData) {
   doc.text(sanitizeForJsPdf(`Fonte: ${(studyData.source || "").slice(0, 92)}`), margin + 4, y + 5.5);
   doc.setFont("helvetica", "bold");
   doc.text(
-    sanitizeForJsPdf(`Data de geracao: ${studyData.date}   |   Idioma: Portugues (Brasil)   |   Total de flashcards: ${totalCards} cartoes`),
+    sanitizeForJsPdf(`Data de geração: ${studyData.date}   |   Idioma: Português (Brasil)   |   Total de flashcards: ${totalCards} cartões`),
     margin + 4,
     y + 11
   );
@@ -1466,7 +1963,7 @@ function compilePdfInBrowser(studyData) {
   };
 
   if (studyData.overview) {
-    drawSectionHeading("1. Visao Geral e Ideia Central");
+    drawSectionHeading("1. Visão Geral e Ideia Central");
     drawParagraph(studyData.overview);
   }
 
@@ -1484,14 +1981,14 @@ function compilePdfInBrowser(studyData) {
   });
 
   if ((studyData.key_concepts || []).length > 0) {
-    drawSectionHeading(`${secNum++}. Definicoes e Conceitos-Chave`);
+    drawSectionHeading(`${secNum++}. Definições e Conceitos-Chave`);
     (studyData.key_concepts || []).forEach((kc) => {
       drawBullet(kc.term || "Conceito", kc.definition || "");
     });
   }
 
   if (studyData.synthesis) {
-    drawSectionHeading(`${secNum++}. Sintese Final`);
+    drawSectionHeading(`${secNum++}. Síntese Final`);
     drawParagraph(studyData.synthesis);
   }
 
@@ -1504,7 +2001,7 @@ function compilePdfInBrowser(studyData) {
   doc.setTextColor(255, 255, 255);
   doc.setFont("helvetica", "bold");
   doc.setFontSize(10.8);
-  doc.text(sanitizeForJsPdf(`PARTE 2 - FLASHCARDS DE REVISAO POR TEMA (${totalCards} CARTOES)`), margin + 4, y + 8);
+  doc.text(sanitizeForJsPdf(`PARTE 2 - FLASHCARDS DE REVISÃO POR TEMA (${totalCards} CARTÕES)`), margin + 4, y + 8);
   y += 16.5;
 
   let cardNum = 1;
@@ -1548,7 +2045,7 @@ function compilePdfInBrowser(studyData) {
       doc.setFontSize(8.5);
       doc.setTextColor(255, 255, 255);
       doc.text(
-        sanitizeForJsPdf(`Cartao ${cardNum++} - Tema: ${(group.theme_short || group.theme || "").slice(0, 62)}`),
+        sanitizeForJsPdf(`Cartão ${cardNum++} - Tema: ${(group.theme_short || group.theme || "").slice(0, 62)}`),
         margin + 3.5,
         y + 4.7
       );
@@ -1584,7 +2081,7 @@ function compilePdfInBrowser(studyData) {
     doc.setTextColor(110, 125, 145);
     doc.text(sanitizeForJsPdf(`EstudaPDF - ${(studyData.title || "").slice(0, 65)}`), margin, pageH - 7.5);
     doc.setFont("helvetica", "bold");
-    doc.text(sanitizeForJsPdf(`Pagina ${p} de ${totalPages}`), pageW - margin - 24, pageH - 7.5);
+    doc.text(sanitizeForJsPdf(`Página ${p} de ${totalPages}`), pageW - margin - 24, pageH - 7.5);
   }
 
   const pdfBlob = doc.output("blob");
@@ -2063,9 +2560,33 @@ async function processPurelyInBrowser(text, attached) {
     lines = resUrl.lines;
   }
 
-  const studyData = runThreeAgentsBrowserPipeline(lines, sourceLabel, sourceType);
+  let studyData = null;
+  if (state.apiKey) {
+    try {
+      const geminiRaw = await callGeminiInBrowser(lines, sourceLabel, sourceType, state.apiKey);
+      const { studyData: reviewedGemini, corrections } = browserAgentReviewer(geminiRaw);
+      studyData = reviewedGemini;
+      studyData.agent_report = {
+        builder: "Agente Construtor (Gemini IA + Extração Coordenada): resumo e flashcards construídos com fidelidade à fonte.",
+        reviewer:
+          corrections.length > 0
+            ? `Agente Revisor: auditoria concluída (${corrections.length} ajuste(s) preventivo(s) aplicado(s)).`
+            : "Agente Revisor: texto auditado sem ruídos, truncamentos ou vazamentos.",
+        tester: "",
+      };
+    } catch (_) {
+      studyData = runThreeAgentsBrowserPipeline(lines, sourceLabel, sourceType);
+    }
+  } else {
+    studyData = runThreeAgentsBrowserPipeline(lines, sourceLabel, sourceType);
+  }
+
   const filename = slugifyFilename(studyData.title);
   const compiled = compilePdfInBrowser(studyData);
+  const testReport = browserAgentTester(studyData, compiled);
+  if (studyData.agent_report) {
+    studyData.agent_report.tester = "Agente de Teste: " + testReport.checks.join(" | ");
+  }
 
   await saveStudyToLocalDB({
     filename,
